@@ -1,0 +1,14 @@
+body {
+    background-image: url('../images/attendant_bg.jpg');
+    background-size: cover;
+    background-attachment: fixed;
+  }
+  
+  .container {
+    background: rgba(255, 255, 255, 0.9);
+    padding: 30px;
+    margin-top: 40px;
+    border-radius: 12px;
+    max-width: 600px;
+  }
+  

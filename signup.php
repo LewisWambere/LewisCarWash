@@ -5,13 +5,19 @@ include 'db_connection.php';
 $msg = '';
 $error = '';
 
+// Admin secret code (you can change this to something only you know)
+$adminSecretCode = "0000";
+
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $username = trim($_POST["username"]);
     $password = trim($_POST["password"]);
     $role = $_POST["role"];
+    $admin_code = isset($_POST["admin_code"]) ? trim($_POST["admin_code"]) : "";
 
     if (empty($username) || empty($password) || empty($role)) {
         $error = "Please fill in all fields.";
+    } elseif ($role === "admin" && $admin_code !== $adminSecretCode) {
+        $error = "Invalid admin code.";
     } else {
         $password_hashed = password_hash($password, PASSWORD_DEFAULT);
         $stmt = $conn->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
@@ -32,6 +38,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <html>
 <head>
     <title>Signup - Lewis Car Wash</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/signup.css">
     <style>
         body {
             background: #f4f7f8;
@@ -112,23 +120,38 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             <input type="password" name="password" required>
 
             <label>Role:</label>
-            <select name="role" required>
+            <select name="role" onchange="toggleAdminCodeField()" required>
                 <option value="">Select Role</option>
                 <option value="admin">Admin</option>
                 <option value="attendant">Attendant</option>
             </select>
 
+            <div id="admin_code_field" style="display: none;">
+                <label>Admin Code:</label>
+                <input type="text" name="admin_code">
+            </div>
+
             <button type="submit">Sign Up</button>
         </form>
+
         <?php if ($error): ?>
             <div class="message error"><?php echo $error; ?></div>
         <?php endif; ?>
         <?php if ($msg): ?>
             <div class="message success"><?php echo $msg; ?></div>
         <?php endif; ?>
+
         <div class="login-link">
             Already have an account? <a href="login.php">Back to Login</a>
         </div>
     </div>
+
+    <script>
+    function toggleAdminCodeField() {
+        const roleSelect = document.querySelector("select[name='role']");
+        const adminCodeField = document.getElementById("admin_code_field");
+        adminCodeField.style.display = roleSelect.value === "admin" ? "block" : "none";
+    }
+    </script>
 </body>
 </html>

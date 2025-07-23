@@ -51,6 +51,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 <html>
 <head>
     <title>Login - Lewis Car Wash</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/login.css">
     <style>
         body {
             background: #f4f7f8;
@@ -109,6 +111,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             font-weight: bold;
         }
 
+        .message.success {
+            color: green;
+            text-align: center;
+            font-weight: bold;
+        }
+
         .signup-link {
             text-align: center;
             margin-top: 10px;
@@ -145,6 +153,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
         <?php if ($error): ?>
             <div class="message error"><?php echo $error; ?></div>
+        <?php endif; ?>
+        <?php if (isset($_GET['message']) && $_GET['message'] == 'logout'): ?>
+            <div class="message success">You have been logged out successfully.</div>
         <?php endif; ?>
 
         <div class="signup-link">
