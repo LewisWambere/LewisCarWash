@@ -1,12 +1,3 @@
-<?php
-$host = 'localhost';
-$user = 'root';
-$password = '';
-$database = 'lewis_car_wash';
-
-$conn = mysqli_connect($host, $user, $password, $database);
-
-if (!$conn) {
-    die("Connection failed: " . mysqli_connect_error());
-}
-?>
+<?php // Database connection
+$conn = new mysqli('localhost', 'root', '', 'lewis_car_wash');
+if ($conn->connect_error) { die('Connection failed: ' . $conn->connect_error); } ?>

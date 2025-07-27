@@ -1,108 +1,200 @@
 <?php
-// mpesa_callback.php - Handle M-Pesa payment callbacks
-header('Content-Type: application/json');
-include('db_connection.php');
+// Replace the initiateMpesaPayment function in your checkout.php with this updated version:
 
-// Log callback data for debugging
-$log_file = 'mpesa_callbacks.log';
-$timestamp = date('Y-m-d H:i:s');
-$callback_data = file_get_contents('php://input');
-
-// Log the raw callback data
-file_put_contents($log_file, "[$timestamp] Raw Callback: $callback_data\n", FILE_APPEND);
-
-$callback_array = json_decode($callback_data, true);
-
-if (!$callback_array) {
-    file_put_contents($log_file, "[$timestamp] ERROR: Invalid JSON received\n", FILE_APPEND);
-    echo json_encode(['ResultCode' => 1, 'ResultDesc' => 'Invalid JSON']);
-    exit;
-}
-
-try {
-    // Extract callback data
-    $result_code = $callback_array['Body']['stkCallback']['ResultCode'] ?? null;
-    $result_desc = $callback_array['Body']['stkCallback']['ResultDesc'] ?? '';
-    $merchant_request_id = $callback_array['Body']['stkCallback']['MerchantRequestID'] ?? '';
-    $checkout_request_id = $callback_array['Body']['stkCallback']['CheckoutRequestID'] ?? '';
+function initiateMpesaPayment($order_id, $phone_number, $amount, $conn) {
+    // M-Pesa API credentials from your Safaricom Developer Portal
+    $consumer_key = 'GWOycWDstHur5rVDlViTa97hIG442cG1NxRtuhoeJwkvMIfe';  // Your actual consumer key
+    $consumer_secret = '3WzLeewiX54QBX5iwYZd3fJWchHXvzOR8D7gjvnGAT3rrjrmxwUGK8s40mhJtAes';  // Your actual consumer secret
     
-    file_put_contents($log_file, "[$timestamp] Processing callback - Result Code: $result_code, Desc: $result_desc\n", FILE_APPEND);
+    // For Sandbox Testing (Paybill)
+    $business_short_code = '174379';  // Default sandbox paybill
+    $passkey = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919';  // Default sandbox passkey
     
-    if ($result_code == 0) {
-        // Payment successful
-        $callback_metadata = $callback_array['Body']['stkCallback']['CallbackMetadata']['Item'] ?? [];
-        
-        $amount = 0;
-        $mpesa_receipt_number = '';
-        $phone_number = '';
-        $transaction_date = '';
-        $account_reference = '';
-        
-        // Extract metadata
-        foreach ($callback_metadata as $item) {
-            switch ($item['Name']) {
-                case 'Amount':
-                    $amount = $item['Value'];
-                    break;
-                case 'MpesaReceiptNumber':
-                    $mpesa_receipt_number = $item['Value'];
-                    break;
-                case 'PhoneNumber':
-                    $phone_number = $item['Value'];
-                    break;
-                case 'TransactionDate':
-                    $transaction_date = $item['Value'];
-                    break;
-                case 'AccountReference':
-                    $account_reference = $item['Value'];
-                    break;
-            }
-        }
-        
-        // Update order status in database
-        $update_query = "UPDATE orders SET 
-                        status = 'completed',
-                        payment_reference = '$mpesa_receipt_number',
-                        payment_phone = '$phone_number',
-                        paid_amount = '$amount',
-                        payment_date = NOW(),
-                        checkout_request_id = '$checkout_request_id'
-                        WHERE order_id = '$account_reference'";
-        
-        if (mysqli_query($conn, $update_query)) {
-            file_put_contents($log_file, "[$timestamp] SUCCESS: Order $account_reference updated successfully\n", FILE_APPEND);
-            
-            // Create transaction record
-            $transaction_query = "INSERT INTO transactions (
-                order_id, customer_username, amount, payment_method, 
-                payment_reference, status, created_at
-            ) SELECT 
-                order_id, customer_username, total_amount, 'mpesa',
-                '$mpesa_receipt_number', 'completed', NOW()
-            FROM orders WHERE order_id = '$account_reference'";
-            
-            mysqli_query($conn, $transaction_query);
-            
-        } else {
-            file_put_contents($log_file, "[$timestamp] ERROR: Database update failed for order $account_reference\n", FILE_APPEND);
-        }
-        
+    // For Production - Replace with your actual values
+    // $business_short_code = 'YOUR_ACTUAL_PAYBILL_NUMBER';
+    // $passkey = 'YOUR_ACTUAL_PASSKEY';
+    
+    // Update with your ngrok URL
+    $callback_url = 'https://0cd04916f8be.ngrok-free.app/mpesa_callback.php';  // Your ngrok URL
+    
+    // Use sandbox URLs for testing, production URLs for live
+    $is_live = false; // Set to true for production
+    
+    if ($is_live) {
+        $oauth_url = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
+        $stkpush_url = 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
     } else {
-        // Payment failed
-        $update_query = "UPDATE orders SET 
-                        status = 'failed',
-                        failure_reason = '$result_desc',
-                        checkout_request_id = '$checkout_request_id'
-                        WHERE checkout_request_id = '$checkout_request_id'";
-        
-        mysqli_query($conn, $update_query);
-        file_put_contents($log_file, "[$timestamp] FAILED: Payment failed - $result_desc\n", FILE_APPEND);
+        $oauth_url = 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
+        $stkpush_url = 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
     }
     
-} catch (Exception $e) {
-    file_put_contents($log_file, "[$timestamp] EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
+    // Generate access token
+    $access_token = getMpesaAccessToken($consumer_key, $consumer_secret, $oauth_url);
+    
+    if (!$access_token) {
+        return ['success' => false, 'message' => 'Failed to get M-Pesa access token'];
+    }
+    
+    // Format phone number (ensure it starts with 254)
+    $phone_number = formatPhoneNumber($phone_number);
+    if (!$phone_number) {
+        return ['success' => false, 'message' => 'Invalid phone number format'];
+    }
+    
+    // Prepare STK Push request
+    $timestamp = date('YmdHis');
+    $password = base64_encode($business_short_code . $passkey . $timestamp);
+    
+    $stkpush_data = [
+        'BusinessShortCode' => $business_short_code,
+        'Password' => $password,
+        'Timestamp' => $timestamp,
+        'TransactionType' => 'CustomerPayBillOnline',
+        'Amount' => (int)$amount, // Ensure it's an integer
+        'PartyA' => $phone_number,
+        'PartyB' => $business_short_code,
+        'PhoneNumber' => $phone_number,
+        'CallBackURL' => $callback_url,
+        'AccountReference' => $order_id,
+        'TransactionDesc' => 'Lewis Car Wash Payment - ' . $order_id
+    ];
+    
+    $headers = [
+        'Authorization: Bearer ' . $access_token,
+        'Content-Type: application/json'
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $stkpush_url);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($stkpush_data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
+    curl_close($ch);
+    
+    // Enhanced logging for debugging
+    $log_data = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'order_id' => $order_id,
+        'phone_number' => $phone_number,
+        'amount' => $amount,
+        'request_data' => $stkpush_data,
+        'response' => $response,
+        'http_code' => $http_code,
+        'curl_error' => $curl_error
+    ];
+    file_put_contents('mpesa_stk_log.txt', json_encode($log_data, JSON_PRETTY_PRINT) . "\n\n", FILE_APPEND);
+    
+    if ($curl_error) {
+        return ['success' => false, 'message' => 'Connection error: ' . $curl_error];
+    }
+    
+    if ($http_code !== 200) {
+        return ['success' => false, 'message' => 'HTTP error: ' . $http_code . ' - Response: ' . $response];
+    }
+    
+    $data = json_decode($response, true);
+    
+    if (!$data) {
+        return ['success' => false, 'message' => 'Invalid response from M-Pesa'];
+    }
+    
+    // Check for successful response
+    if (isset($data['ResponseCode']) && $data['ResponseCode'] == '0') {
+        return [
+            'success' => true,
+            'CheckoutRequestID' => $data['CheckoutRequestID'],
+            'MerchantRequestID' => $data['MerchantRequestID'],
+            'ResponseDescription' => $data['ResponseDescription']
+        ];
+    } else {
+        // Handle various error scenarios
+        $error_message = '';
+        
+        if (isset($data['ResponseDescription'])) {
+            $error_message = $data['ResponseDescription'];
+        } elseif (isset($data['errorMessage'])) {
+            $error_message = $data['errorMessage'];
+        } elseif (isset($data['RequestId']) && isset($data['errorCode'])) {
+            $error_message = "Error " . $data['errorCode'] . ": " . ($data['errorMessage'] ?? 'Unknown error');
+        } else {
+            $error_message = 'Unknown error occurred';
+        }
+        
+        return ['success' => false, 'message' => $error_message];
+    }
 }
 
-// Respond to Safaricom
-echo json_encode(['ResultCode' => 0, 'ResultDesc' => 'Success']);
+// Enhanced access token function with better error handling
+function getMpesaAccessToken($consumer_key, $consumer_secret, $oauth_url) {
+    $credentials = base64_encode($consumer_key . ':' . $consumer_secret);
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $oauth_url);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Basic ' . $credentials]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
+    curl_close($ch);
+    
+    // Log OAuth attempts
+    $log_data = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'oauth_url' => $oauth_url,
+        'http_code' => $http_code,
+        'response' => $response,
+        'curl_error' => $curl_error
+    ];
+    file_put_contents('mpesa_oauth_log.txt', json_encode($log_data, JSON_PRETTY_PRINT) . "\n\n", FILE_APPEND);
+    
+    if ($curl_error) {
+        error_log("M-Pesa OAuth cURL Error: " . $curl_error);
+        return false;
+    }
+    
+    if ($http_code !== 200) {
+        error_log("M-Pesa OAuth HTTP Error: " . $http_code . " - " . $response);
+        return false;
+    }
+    
+    $data = json_decode($response, true);
+    return isset($data['access_token']) ? $data['access_token'] : false;
+}
+
+// Enhanced phone number formatting with better validation
+function formatPhoneNumber($phone) {
+    // Remove any non-numeric characters
+    $phone = preg_replace('/[^0-9]/', '', $phone);
+    
+    // Handle different formats
+    if (strlen($phone) == 10 && substr($phone, 0, 1) == '0') {
+        // Convert 0XXXXXXXXX to 254XXXXXXXXX
+        $formatted = '254' . substr($phone, 1);
+    } elseif (strlen($phone) == 9) {
+        // Convert XXXXXXXXX to 254XXXXXXXXX
+        $formatted = '254' . $phone;
+    } elseif (strlen($phone) == 12 && substr($phone, 0, 3) == '254') {
+        // Already in correct format
+        $formatted = $phone;
+    } else {
+        return false; // Invalid format
+    }
+    
+    // Validate Kenyan mobile number format (should start with 254 followed by 7, 1, or 0)
+    if (preg_match('/^254[701]\d{8}$/', $formatted)) {
+        return $formatted;
+    }
+    
+    return false; // Invalid Kenyan mobile number
+}
 ?>

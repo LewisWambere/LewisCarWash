@@ -34,9 +34,9 @@ if (isset($_POST['payment_method'])) {
     // Generate unique order ID
     $order_id = 'LCW_' . time() . '_' . rand(1000, 9999);
     
-    // Store order in database
-    $order_query = "INSERT INTO orders (order_id, customer_username, total_amount, payment_method, status, created_at) 
-                    VALUES ('$order_id', '$username', '$cart_total', '$payment_method', 'pending', NOW())";
+    // Store order in database with additional fields for M-Pesa tracking
+    $order_query = "INSERT INTO orders (order_id, customer_username, total_amount, payment_method, status, customer_name, customer_email, customer_phone, created_at) 
+                    VALUES ('$order_id', '$username', '$cart_total', '$payment_method', 'pending', '$customer_name', '$customer_email', '$phone_number', NOW())";
     
     if (mysqli_query($conn, $order_query)) {
         $order_db_id = mysqli_insert_id($conn);
@@ -49,9 +49,26 @@ if (isset($_POST['payment_method'])) {
         }
         
         if ($payment_method === 'mpesa') {
-            // Redirect to M-Pesa payment processing
-            header("Location: ?step=mpesa_payment&order_id=" . urlencode($order_id) . "&phone=" . urlencode($phone_number));
-            exit();
+            // Initiate M-Pesa STK Push
+            $mpesa_result = initiateMpesaPayment($order_id, $phone_number, $cart_total, $conn);
+            
+            if ($mpesa_result['success']) {
+                // Store the checkout request ID for callback tracking
+                $checkout_request_id = $mpesa_result['CheckoutRequestID'];
+                $merchant_request_id = $mpesa_result['MerchantRequestID'];
+                
+                $update_query = "UPDATE orders SET 
+                                checkout_request_id = '$checkout_request_id',
+                                merchant_request_id = '$merchant_request_id'
+                                WHERE order_id = '$order_id'";
+                mysqli_query($conn, $update_query);
+                
+                // Redirect to payment processing page
+                header("Location: ?step=mpesa_payment&order_id=" . urlencode($order_id));
+                exit();
+            } else {
+                $error_message = "Failed to initiate M-Pesa payment: " . ($mpesa_result['message'] ?? 'Unknown error');
+            }
         } elseif ($payment_method === 'paypal') {
             // Redirect to PayPal payment processing
             header("Location: ?step=paypal_payment&order_id=" . urlencode($order_id));
@@ -62,29 +79,37 @@ if (isset($_POST['payment_method'])) {
     }
 }
 
-// Handle M-Pesa STK Push
-if (isset($_GET['step']) && $_GET['step'] === 'mpesa_payment') {
-    $order_id = $_GET['order_id'];
-    $phone_number = $_GET['phone'];
-    
-    // M-Pesa Daraja API integration
-    $mpesa_result = initiateMpesaPayment($order_id, $phone_number, $cart_total);
-}
-
 // M-Pesa Daraja API Functions
-function initiateMpesaPayment($order_id, $phone_number, $amount) {
+function initiateMpesaPayment($order_id, $phone_number, $amount, $conn) {
     // M-Pesa API credentials (replace with your actual credentials)
-    $consumer_key = 'YOUR_CONSUMER_KEY';
-    $consumer_secret = 'YOUR_CONSUMER_SECRET';
+    $consumer_key = 'GWOycWDstHur5rVDlViTa97hIG442cG1NxRtuhoeJwkvMIfe';
+    $consumer_secret = '3WzLeewiX54QBX5iwYZd3fJWchHXvzOR8D7gjvnGAT3rrjrmxwUGK8s40mhJtAes';
     $business_short_code = 'YOUR_BUSINESS_SHORTCODE';
     $passkey = 'YOUR_PASSKEY';
     $callback_url = 'https://yourdomain.com/mpesa_callback.php';
     
+    // Use sandbox URLs for testing, production URLs for live
+    $is_live = false; // Set to true for production
+    
+    if ($is_live) {
+        $oauth_url = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
+        $stkpush_url = 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
+    } else {
+        $oauth_url = 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
+        $stkpush_url = 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
+    }
+    
     // Generate access token
-    $access_token = getMpesaAccessToken($consumer_key, $consumer_secret);
+    $access_token = getMpesaAccessToken($consumer_key, $consumer_secret, $oauth_url);
     
     if (!$access_token) {
         return ['success' => false, 'message' => 'Failed to get M-Pesa access token'];
+    }
+    
+    // Format phone number (ensure it starts with 254)
+    $phone_number = formatPhoneNumber($phone_number);
+    if (!$phone_number) {
+        return ['success' => false, 'message' => 'Invalid phone number format'];
     }
     
     // Prepare STK Push request
@@ -96,13 +121,13 @@ function initiateMpesaPayment($order_id, $phone_number, $amount) {
         'Password' => $password,
         'Timestamp' => $timestamp,
         'TransactionType' => 'CustomerPayBillOnline',
-        'Amount' => $amount,
+        'Amount' => (int)$amount, // Ensure it's an integer
         'PartyA' => $phone_number,
         'PartyB' => $business_short_code,
         'PhoneNumber' => $phone_number,
         'CallBackURL' => $callback_url,
         'AccountReference' => $order_id,
-        'TransactionDesc' => 'Lewis Car Wash Payment'
+        'TransactionDesc' => 'Lewis Car Wash Payment - ' . $order_id
     ];
     
     $headers = [
@@ -111,35 +136,114 @@ function initiateMpesaPayment($order_id, $phone_number, $amount) {
     ];
     
     $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest');
+    curl_setopt($ch, CURLOPT_URL, $stkpush_url);
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($stkpush_data));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     
     $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
     curl_close($ch);
     
-    return json_decode($response, true);
+    // Log the request and response for debugging
+    $log_data = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'order_id' => $order_id,
+        'request' => $stkpush_data,
+        'response' => $response,
+        'http_code' => $http_code,
+        'curl_error' => $curl_error
+    ];
+    file_put_contents('mpesa_stk_log.txt', json_encode($log_data) . "\n", FILE_APPEND);
+    
+    if ($curl_error) {
+        return ['success' => false, 'message' => 'Connection error: ' . $curl_error];
+    }
+    
+    if ($http_code !== 200) {
+        return ['success' => false, 'message' => 'HTTP error: ' . $http_code];
+    }
+    
+    $data = json_decode($response, true);
+    
+    if (!$data) {
+        return ['success' => false, 'message' => 'Invalid response from M-Pesa'];
+    }
+    
+    if (isset($data['ResponseCode']) && $data['ResponseCode'] == '0') {
+        return [
+            'success' => true,
+            'CheckoutRequestID' => $data['CheckoutRequestID'],
+            'MerchantRequestID' => $data['MerchantRequestID'],
+            'ResponseDescription' => $data['ResponseDescription']
+        ];
+    } else {
+        $error_message = $data['ResponseDescription'] ?? $data['errorMessage'] ?? 'Unknown error';
+        return ['success' => false, 'message' => $error_message];
+    }
 }
 
-function getMpesaAccessToken($consumer_key, $consumer_secret) {
+function getMpesaAccessToken($consumer_key, $consumer_secret, $oauth_url) {
     $credentials = base64_encode($consumer_key . ':' . $consumer_secret);
     
     $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials');
+    curl_setopt($ch, CURLOPT_URL, $oauth_url);
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Basic ' . $credentials]);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     
     $response = curl_exec($ch);
+    $curl_error = curl_error($ch);
     curl_close($ch);
+    
+    if ($curl_error) {
+        error_log("M-Pesa OAuth Error: " . $curl_error);
+        return false;
+    }
     
     $data = json_decode($response, true);
     return isset($data['access_token']) ? $data['access_token'] : false;
 }
 
+function formatPhoneNumber($phone) {
+    // Remove any non-numeric characters
+    $phone = preg_replace('/[^0-9]/', '', $phone);
+    
+    // Handle different formats
+    if (strlen($phone) == 10 && substr($phone, 0, 1) == '0') {
+        // Convert 0XXXXXXXXX to 254XXXXXXXXX
+        return '254' . substr($phone, 1);
+    } elseif (strlen($phone) == 9) {
+        // Convert XXXXXXXXX to 254XXXXXXXXX
+        return '254' . $phone;
+    } elseif (strlen($phone) == 12 && substr($phone, 0, 3) == '254') {
+        // Already in correct format
+        return $phone;
+    }
+    
+    return false; // Invalid format
+}
+
+// Handle M-Pesa payment status check
+if (isset($_GET['step']) && $_GET['step'] === 'mpesa_payment') {
+    $order_id = $_GET['order_id'];
+    
+    // Get order details
+    $order_query = "SELECT * FROM orders WHERE order_id = '$order_id' AND customer_username = '$username'";
+    $order_result = mysqli_query($conn, $order_query);
+    
+    if ($order_result && mysqli_num_rows($order_result) > 0) {
+        $order = mysqli_fetch_assoc($order_result);
+    } else {
+        header("Location: book_service.php");
+        exit();
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -485,6 +589,53 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
             border: 1px solid #c3e6cb;
         }
 
+        .payment-status {
+            text-align: center;
+            padding: 2rem;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+        }
+
+        .payment-status.waiting {
+            border: 2px solid #ffc107;
+            background: #fff9e6;
+        }
+
+        .payment-status.success {
+            border: 2px solid #28a745;
+            background: #e8f5e8;
+        }
+
+        .payment-status.failed {
+            border: 2px solid #dc3545;
+            background: #f8e8e8;
+        }
+
+        .status-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+
+        .waiting .status-icon {
+            color: #ffc107;
+            animation: pulse 2s infinite;
+        }
+
+        .success .status-icon {
+            color: #28a745;
+        }
+
+        .failed .status-icon {
+            color: #dc3545;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
         @media (max-width: 768px) {
             .checkout-container {
                 grid-template-columns: 1fr;
@@ -548,21 +699,24 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
                 <i class="fas fa-mobile-alt mpesa-icon"></i> M-Pesa Payment
             </h3>
             
+            <div class="payment-status waiting" id="paymentStatus">
+                <div class="status-icon">
+                    <i class="fas fa-mobile-alt"></i>
+                </div>
+                <h4>Waiting for Payment</h4>
+                <p>A payment request has been sent to your phone</p>
+                <p><strong>Amount: KES <?= number_format($cart_total, 2) ?></strong></p>
+                <p>Order ID: <?= htmlspecialchars($_GET['order_id']) ?></p>
+            </div>
+            
             <div class="mpesa-instructions">
                 <h4>Payment Instructions:</h4>
                 <ol>
-                    <li>A payment request has been sent to your phone</li>
                     <li>Check your phone for M-Pesa STK push notification</li>
                     <li>Enter your M-Pesa PIN to complete the payment</li>
                     <li>You will receive a confirmation SMS once payment is successful</li>
+                    <li>This page will automatically update when payment is confirmed</li>
                 </ol>
-            </div>
-
-            <div style="text-align: center; margin-top: 2rem;">
-                <div class="spinner"></div>
-                <p>Waiting for payment confirmation...</p>
-                <p><strong>Amount: KES <?= number_format($cart_total, 2) ?></strong></p>
-                <p>Order ID: <?= htmlspecialchars($_GET['order_id']) ?></p>
             </div>
 
             <div style="margin-top: 2rem; text-align: center;">
@@ -661,7 +815,7 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
                     <div id="mpesa-form" class="payment-form">
                         <div class="form-group">
                             <label for="phone_number">M-Pesa Phone Number</label>
-                            <input type="tel" id="phone_number" name="phone_number" placeholder="254XXXXXXXXX" pattern="254[0-9]{9}">
+                            <input type="tel" id="phone_number" name="phone_number" placeholder="0712345678 or 254712345678" pattern="^(254|0)[0-9]{9}$">
                         </div>
                         <div class="mpesa-instructions">
                             <h4>How it works:</h4>
@@ -700,6 +854,7 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
 
     <script>
         let selectedPayment = null;
+        let paymentCheckInterval = null;
 
         function selectPayment(method) {
             // Remove previous selection
@@ -728,20 +883,70 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
             }
         }
 
+        // Phone number formatting
+        document.getElementById('phone_number')?.addEventListener('input', function(e) {
+            let value = e.target.value.replace(/\D/g, ''); // Remove non-digits
+            
+            if (value.startsWith('254')) {
+                e.target.value = value.slice(0, 12); // Limit to 12 digits for 254XXXXXXXXX
+            } else if (value.startsWith('0')) {
+                e.target.value = value.slice(0, 10); // Limit to 10 digits for 0XXXXXXXXX
+            } else {
+                e.target.value = value.slice(0, 9); // Limit to 9 digits for XXXXXXXXX
+            }
+        });
+
         // Form validation
-        document.getElementById('checkoutForm').addEventListener('submit', function(e) {
+        document.getElementById('checkoutForm')?.addEventListener('submit', function(e) {
             if (selectedPayment === 'mpesa') {
                 const phoneNumber = document.getElementById('phone_number').value;
-                if (!phoneNumber || !phoneNumber.match(/^254[0-9]{9}$/)) {
+                if (!phoneNumber || !validatePhoneNumber(phoneNumber)) {
                     e.preventDefault();
-                    alert('Please enter a valid M-Pesa phone number (format: 254XXXXXXXXX)');
+                    alert('Please enter a valid M-Pesa phone number:\n- 0712345678 (10 digits starting with 0)\n- 254712345678 (12 digits starting with 254)');
                     return;
                 }
+            }
+            
+            // Validate customer info
+            const customerName = document.getElementById('customer_name').value.trim();
+            const customerEmail = document.getElementById('customer_email').value.trim();
+            
+            if (!customerName) {
+                e.preventDefault();
+                alert('Please enter your full name');
+                return;
+            }
+            
+            if (!customerEmail || !isValidEmail(customerEmail)) {
+                e.preventDefault();
+                alert('Please enter a valid email address');
+                return;
             }
             
             // Show loading overlay
             document.getElementById('loadingOverlay').style.display = 'flex';
         });
+
+        function validatePhoneNumber(phone) {
+            // Remove any non-digit characters
+            const cleanPhone = phone.replace(/\D/g, '');
+            
+            // Check various valid formats
+            if (cleanPhone.length === 10 && cleanPhone.startsWith('0')) {
+                return true; // 0XXXXXXXXX
+            } else if (cleanPhone.length === 12 && cleanPhone.startsWith('254')) {
+                return true; // 254XXXXXXXXX
+            } else if (cleanPhone.length === 9) {
+                return true; // XXXXXXXXX (will be converted to 254XXXXXXXXX)
+            }
+            
+            return false;
+        }
+
+        function isValidEmail(email) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            return emailRegex.test(email);
+        }
 
         // PayPal Integration (for the PayPal payment step)
         <?php if (isset($_GET['step']) && $_GET['step'] === 'paypal_payment'): ?>
@@ -758,19 +963,44 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
             },
             onApprove: function(data, actions) {
                 return actions.order.capture().then(function(details) {
-                    // Payment successful
-                    window.location.href = 'payment_complete.php?order_id=<?= $_GET['order_id'] ?>&payment_id=' + details.id;
+                    // Payment successful - update order status and redirect
+                    updatePayPalPayment('<?= $_GET['order_id'] ?>', details.id).then(() => {
+                        window.location.href = 'payment_complete.php?order_id=<?= $_GET['order_id'] ?>&payment_id=' + details.id;
+                    });
                 });
             },
             onError: function(err) {
+                console.error('PayPal Error:', err);
                 alert('Payment failed. Please try again.');
                 window.location.href = 'checkout.php';
             }
         }).render('#paypal-button-container');
         <?php endif; ?>
 
+        // Update PayPal payment in database
+        async function updatePayPalPayment(orderId, paymentId) {
+            try {
+                const response = await fetch('update_paypal_payment.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `order_id=${encodeURIComponent(orderId)}&payment_id=${encodeURIComponent(paymentId)}`
+                });
+                return await response.json();
+            } catch (error) {
+                console.error('Error updating PayPal payment:', error);
+            }
+        }
+
         // Check M-Pesa payment status
         function checkPaymentStatus(orderId) {
+            const button = event.target;
+            const originalText = button.innerHTML;
+            
+            button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking...';
+            button.disabled = true;
+            
             fetch('check_payment_status.php', {
                 method: 'POST',
                 headers: {
@@ -782,26 +1012,110 @@ function getMpesaAccessToken($consumer_key, $consumer_secret) {
             .then(data => {
                 if (data.success) {
                     if (data.paid) {
-                        window.location.href = 'payment_complete.php?order_id=' + orderId;
+                        // Payment successful
+                        updatePaymentStatus('success', 'Payment Successful!', 'Your payment has been confirmed.');
+                        setTimeout(() => {
+                            window.location.href = 'payment_complete.php?order_id=' + orderId;
+                        }, 2000);
+                    } else if (data.status === 'failed') {
+                        // Payment failed
+                        updatePaymentStatus('failed', 'Payment Failed', data.failure_reason || 'Payment was not successful.');
                     } else {
-                        alert('Payment not yet received. Please complete the payment on your phone.');
+                        // Still pending
+                        updatePaymentStatus('waiting', 'Still Waiting', 'Payment not yet received. Please complete the payment on your phone.');
                     }
                 } else {
+                    console.error('Error:', data.message);
                     alert('Error checking payment status: ' + data.message);
                 }
             })
             .catch(error => {
                 console.error('Error:', error);
-                alert('Error checking payment status');
+                alert('Error checking payment status. Please try again.');
+            })
+            .finally(() => {
+                button.innerHTML = originalText;
+                button.disabled = false;
             });
         }
 
-        // Auto-check payment status for M-Pesa every 10 seconds
+        function updatePaymentStatus(status, title, message) {
+            const statusDiv = document.getElementById('paymentStatus');
+            if (!statusDiv) return;
+            
+            // Remove existing status classes
+            statusDiv.classList.remove('waiting', 'success', 'failed');
+            statusDiv.classList.add(status);
+            
+            // Update icon based on status
+            const icon = statusDiv.querySelector('.status-icon i');
+            icon.className = '';
+            
+            if (status === 'waiting') {
+                icon.className = 'fas fa-mobile-alt';
+            } else if (status === 'success') {
+                icon.className = 'fas fa-check-circle';
+            } else if (status === 'failed') {
+                icon.className = 'fas fa-times-circle';
+            }
+            
+            // Update text
+            statusDiv.querySelector('h4').textContent = title;
+            statusDiv.querySelector('p').textContent = message;
+        }
+
+        // Auto-check payment status for M-Pesa every 15 seconds
         <?php if (isset($_GET['step']) && $_GET['step'] === 'mpesa_payment'): ?>
-        setInterval(function() {
-            checkPaymentStatus('<?= $_GET['order_id'] ?>');
-        }, 10000);
+        let checkCount = 0;
+        const maxChecks = 40; // Check for up to 10 minutes (40 * 15 seconds)
+        
+        paymentCheckInterval = setInterval(function() {
+            checkCount++;
+            
+            if (checkCount >= maxChecks) {
+                clearInterval(paymentCheckInterval);
+                updatePaymentStatus('failed', 'Payment Timeout', 'Payment confirmation timeout. Please try again or contact support.');
+                return;
+            }
+            
+            // Auto-check without button feedback
+            fetch('check_payment_status.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'order_id=' + encodeURIComponent('<?= $_GET['order_id'] ?>')
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.paid) {
+                    clearInterval(paymentCheckInterval);
+                    updatePaymentStatus('success', 'Payment Successful!', 'Your payment has been confirmed. Redirecting...');
+                    setTimeout(() => {
+                        window.location.href = 'payment_complete.php?order_id=<?= $_GET['order_id'] ?>';
+                    }, 2000);
+                } else if (data.success && data.status === 'failed') {
+                    clearInterval(paymentCheckInterval);
+                    updatePaymentStatus('failed', 'Payment Failed', data.failure_reason || 'Payment was not successful.');
+                }
+            })
+            .catch(error => {
+                console.error('Auto-check error:', error);
+            });
+        }, 15000); // Check every 15 seconds
+
+        // Clear interval when page is unloaded
+        window.addEventListener('beforeunload', function() {
+            if (paymentCheckInterval) {
+                clearInterval(paymentCheckInterval);
+            }
+        });
         <?php endif; ?>
+
+        // Prevent form resubmission on page refresh
+        if (window.history.replaceState) {
+            window.history.replaceState(null, null, window.location.href);
+        }
     </script>
 </body>
 </html>
