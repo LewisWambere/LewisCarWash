@@ -31,7 +31,7 @@ if (isset($_POST['action'])) {
             $bookings_query = "SELECT b.*, s.price, s.service_type as service_name 
                               FROM bookings b 
                               LEFT JOIN services s ON b.service_type = s.service_type 
-                              WHERE b.customer_username = (SELECT username FROM customers WHERE id = ?) 
+                              WHERE b.customer_username = (SELECT username FROM users WHERE id = ? AND role = 'customer') 
                               ORDER BY b.booking_date DESC 
                               LIMIT 10";
             
@@ -55,16 +55,20 @@ if (isset($_POST['action'])) {
             $search = trim($_POST['search']);
             $search_param = "%{$search}%";
             
-            $search_query = "SELECT c.*, 
+            // Updated search query with proper JOIN
+            $search_query = "SELECT u.id, u.username, u.created_at as date_added,
+                            c.name, c.email, c.phone,
                             COUNT(b.id) as total_bookings,
                             COALESCE(SUM(CASE WHEN b.status = 'completed' THEN s.price ELSE 0 END), 0) as total_spent,
                             MAX(b.booking_date) as last_visit
-                            FROM customers c 
-                            LEFT JOIN bookings b ON c.username = b.customer_username 
+                            FROM users u 
+                            LEFT JOIN customers c ON u.id = c.user_id
+                            LEFT JOIN bookings b ON u.username = b.customer_username 
                             LEFT JOIN services s ON b.service_type = s.service_type
-                            WHERE c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR c.username LIKE ?
-                            GROUP BY c.id 
-                            ORDER BY c.name ASC";
+                            WHERE u.role = 'customer' 
+                            AND (c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR u.username LIKE ?)
+                            GROUP BY u.id 
+                            ORDER BY c.name ASC, u.username ASC";
             
             $stmt = mysqli_prepare($conn, $search_query);
             if ($stmt) {
@@ -84,16 +88,19 @@ if (isset($_POST['action'])) {
     }
 }
 
-// Get customers with their booking statistics
-$customers_query = "SELECT c.*, 
+// Get customers with their booking statistics - JOIN users and customers tables
+$customers_query = "SELECT u.id, u.username, u.created_at as date_added,
+                    c.name, c.email, c.phone,
                     COUNT(b.id) as total_bookings,
                     COALESCE(SUM(CASE WHEN b.status = 'completed' THEN s.price ELSE 0 END), 0) as total_spent,
                     MAX(b.booking_date) as last_visit
-                    FROM customers c 
-                    LEFT JOIN bookings b ON c.username = b.customer_username 
+                    FROM users u 
+                    LEFT JOIN customers c ON u.id = c.user_id
+                    LEFT JOIN bookings b ON u.username = b.customer_username 
                     LEFT JOIN services s ON b.service_type = s.service_type
-                    GROUP BY c.id 
-                    ORDER BY c.name ASC";
+                    WHERE u.role = 'customer'
+                    GROUP BY u.id 
+                    ORDER BY c.name ASC, u.username ASC";
 
 $customers_result = safe_query($conn, $customers_query);
 $customers = [];
@@ -104,9 +111,14 @@ if ($customers_result) {
     }
 }
 
-// If no customers found, try simpler query (in case bookings/services tables don't exist)
+// If no customers found, try simpler query with JOIN
 if (empty($customers)) {
-    $simple_query = "SELECT * FROM customers ORDER BY name ASC";
+    $simple_query = "SELECT u.id, u.username, u.created_at as date_added,
+                     c.name, c.email, c.phone
+                     FROM users u 
+                     LEFT JOIN customers c ON u.id = c.user_id
+                     WHERE u.role = 'customer' 
+                     ORDER BY c.name ASC, u.username ASC";
     $simple_result = safe_query($conn, $simple_query);
     
     if ($simple_result) {
@@ -557,7 +569,19 @@ if (empty($customers)) {
     <div class="header">
         <div class="header-content">
             <div class="logo-section">
-                <h1><i class="fas fa-car-wash"></i> Lewis Car Wash</h1>
+                <?php
+                $dashboard_url = 'dashboard.php';
+                if (isset($_SESSION['role'])) {
+                    if ($_SESSION['role'] === 'attendant') {
+                        $dashboard_url = 'attendant_dashboard.php';
+                    } elseif ($_SESSION['role'] === 'customer') {
+                        $dashboard_url = 'customer_dashboard.php';
+                    }
+                }
+                ?>
+                <a href="<?= $dashboard_url ?>" style="text-decoration: none;">
+                    <h1><i class="fas fa-car-wash"></i> Lewis Car Wash</h1>
+                </a>
             </div>
             <div class="user-section">
                 <div class="welcome-text">
@@ -833,3 +857,99 @@ if (empty($customers)) {
                     <div class="empty-state">
                         <i class="fas fa-exclamation-triangle"></i>
                         <h3>Connection Error</h3>
+                        <p>Unable to load booking history. Please try again.</p>
+                    </div>
+                `;
+            });
+        }
+
+        // Display bookings in modal
+        function displayBookings(bookings) {
+            const content = document.getElementById('bookingsContent');
+            
+            if (bookings.length === 0) {
+                content.innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-calendar-times"></i>
+                        <h3>No Bookings Found</h3>
+                        <p>This customer hasn't made any bookings yet.</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let bookingsHTML = '';
+            bookings.forEach(booking => {
+                const statusClass = `status-${booking.status || 'waiting'}`;
+                const bookingDate = booking.booking_date ? new Date(booking.booking_date).toLocaleDateString('en-US', { 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                }) : 'N/A';
+                
+                bookingsHTML += `
+                    <div class="booking-item">
+                        <div class="booking-header">
+                            <span class="booking-service">${escapeHtml(booking.service_name || booking.service_type || 'Unknown Service')}</span>
+                            <span class="booking-status ${statusClass}">${escapeHtml(booking.status || 'Waiting')}</span>
+                        </div>
+                        <div class="booking-details">
+                            <p><strong>Date:</strong> ${bookingDate}</p>
+                            <p><strong>Price:</strong> KES ${new Intl.NumberFormat().format(booking.price || 0)}</p>
+                            ${booking.notes ? `<p><strong>Notes:</strong> ${escapeHtml(booking.notes)}</p>` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            content.innerHTML = bookingsHTML;
+        }
+
+        // Close bookings modal
+        function closeBookingsModal() {
+            document.getElementById('bookingsModal').style.display = 'none';
+        }
+
+        // Show notification
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.className = `notification ${type}`;
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 3000);
+        }
+
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text ? text.replace(/[&<>"']/g, m => map[m]) : '';
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('bookingsModal');
+            if (event.target === modal) {
+                closeBookingsModal();
+            }
+        }
+
+        // Allow search on Enter key
+        document.getElementById('searchInput').addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                searchCustomers();
+            }
+        });
+    </script>
+</body>
+</html>

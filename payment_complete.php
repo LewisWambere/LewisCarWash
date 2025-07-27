@@ -307,7 +307,21 @@ if ($order['status'] === 'completed') {
 <body>
     <div class="success-container" id="receiptContainer">
         <div class="logo-header">
-            <h1><i class="fas fa-car-wash"></i> Lewis Car Wash</h1>
+            <div class="logo-section">
+                <?php
+                $dashboard_url = 'dashboard.php';
+                if (isset($_SESSION['role'])) {
+                    if ($_SESSION['role'] === 'attendant') {
+                        $dashboard_url = 'attendant_dashboard.php';
+                    } elseif ($_SESSION['role'] === 'customer') {
+                        $dashboard_url = 'customer_dashboard.php';
+                    }
+                }
+                ?>
+                <a href="<?= $dashboard_url ?>" style="text-decoration: none;">
+                    <h1><i class="fas fa-car-wash"></i> Lewis Car Wash</h1>
+                </a>
+            </div>
             <p>Professional Car Cleaning Services</p>
         </div>
 

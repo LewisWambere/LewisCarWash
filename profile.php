@@ -483,7 +483,21 @@ $user = mysqli_fetch_assoc($user_result);
 <body>
     <div class="container">
         <div class="header">
-            <h1><i class="fas fa-user-circle"></i> My Profile</h1>
+            <div class="logo-section">
+                <?php
+                $dashboard_url = 'dashboard.php';
+                if (isset($_SESSION['role'])) {
+                    if ($_SESSION['role'] === 'attendant') {
+                        $dashboard_url = 'attendant_dashboard.php';
+                    } elseif ($_SESSION['role'] === 'customer') {
+                        $dashboard_url = 'customer_dashboard.php';
+                    }
+                }
+                ?>
+                <a href="<?= $dashboard_url ?>" style="text-decoration: none;">
+                    <h1><i class="fas fa-car-wash"></i> Lewis Car Wash</h1>
+                </a>
+            </div>
             <a href="<?= $role === 'admin' ? 'dashboard.php' : ($role === 'attendant' ? 'attendant_dashboard.php' : 'customer_dashboard.php') ?>" class="back-btn">
                 <i class="fas fa-arrow-left"></i> Back to Dashboard
             </a>

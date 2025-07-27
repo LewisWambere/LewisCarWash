@@ -7,6 +7,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $password = mysqli_real_escape_string($conn, trim($_POST['password']));
     $role = mysqli_real_escape_string($conn, trim($_POST['role']));
     
+    // Additional fields for customer table
+    $full_name = mysqli_real_escape_string($conn, trim($_POST['full_name'] ?? ''));
+    $email = mysqli_real_escape_string($conn, trim($_POST['email'] ?? ''));
+    $phone = mysqli_real_escape_string($conn, trim($_POST['phone'] ?? ''));
+    
     // Check if username already exists
     $check_query = "SELECT * FROM users WHERE username='$username'";
     $check_result = mysqli_query($conn, $check_query);
@@ -14,15 +19,39 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     if (mysqli_num_rows($check_result) > 0) {
         $error = "Username already exists! Please choose a different username.";
     } else {
-        // Insert new user
-        $query = "INSERT INTO users (username, password, role) VALUES ('$username', '$password', '$role')";
+        // Start transaction
+        mysqli_begin_transaction($conn);
         
-        if (mysqli_query($conn, $query)) {
-            $success = "Account created successfully! Redirecting to login...";
-            // Redirect after 2 seconds
-            header("refresh:2;url=login.php");
-        } else {
-            $error = "Error creating account: " . mysqli_error($conn);
+        try {
+            // Insert new user
+            $user_query = "INSERT INTO users (username, password, role) VALUES ('$username', '$password', '$role')";
+            
+            if (mysqli_query($conn, $user_query)) {
+                $user_id = mysqli_insert_id($conn);
+                
+                // If role is customer, also insert into customers table
+                if ($role === 'customer') {
+                    $customer_query = "INSERT INTO customers (user_id, name, email, phone, date_added) VALUES ('$user_id', '$full_name', '$email', '$phone', NOW())";
+                    
+                    if (!mysqli_query($conn, $customer_query)) {
+                        throw new Exception("Error creating customer record: " . mysqli_error($conn));
+                    }
+                }
+                
+                // Commit transaction
+                mysqli_commit($conn);
+                $success = "Account created successfully! Redirecting to login...";
+                // Redirect after 2 seconds
+                header("refresh:2;url=login.php");
+                
+            } else {
+                throw new Exception("Error creating user account: " . mysqli_error($conn));
+            }
+            
+        } catch (Exception $e) {
+            // Rollback transaction on error
+            mysqli_rollback($conn);
+            $error = $e->getMessage();
         }
     }
 }
@@ -135,6 +164,27 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 
         .form-control:hover {
             border-color: #cccccc;
+        }
+
+        /* Customer-specific fields styling */
+        .customer-fields {
+            display: none;
+            animation: slideDown 0.3s ease-in-out;
+        }
+
+        .customer-fields.show {
+            display: block;
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                max-height: 0;
+            }
+            to {
+                opacity: 1;
+                max-height: 500px;
+            }
         }
 
         /* Button Styling */
@@ -390,6 +440,24 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                             </select>
                         </div>
                         
+                        <!-- Customer-specific fields (shown only when customer role is selected) -->
+                        <div id="customer-fields" class="customer-fields">
+                            <div class="form-group">
+                                <label for="full_name">Full Name</label>
+                                <input type="text" name="full_name" id="full_name" class="form-control" placeholder="Enter your full name">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="email">Email Address</label>
+                                <input type="email" name="email" id="email" class="form-control" placeholder="Enter your email address">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="phone">Phone Number</label>
+                                <input type="tel" name="phone" id="phone" class="form-control" placeholder="Enter your phone number">
+                            </div>
+                        </div>
+                        
                         <button type="submit" class="btn-primary">
                             <i class="fas fa-user-plus"></i> Create Account
                         </button>
@@ -424,6 +492,32 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     </div>
 
     <script>
+        // Show/hide customer-specific fields based on role selection
+        document.getElementById('role').addEventListener('change', function() {
+            const customerFields = document.getElementById('customer-fields');
+            const fullNameInput = document.getElementById('full_name');
+            const emailInput = document.getElementById('email');
+            const phoneInput = document.getElementById('phone');
+            
+            if (this.value === 'customer') {
+                customerFields.classList.add('show');
+                // Make customer fields required
+                fullNameInput.required = true;
+                emailInput.required = true;
+                phoneInput.required = true;
+            } else {
+                customerFields.classList.remove('show');
+                // Remove required attribute for non-customer roles
+                fullNameInput.required = false;
+                emailInput.required = false;
+                phoneInput.required = false;
+                // Clear values
+                fullNameInput.value = '';
+                emailInput.value = '';
+                phoneInput.value = '';
+            }
+        });
+
         // Add loading state to button on form submit
         document.querySelector('form').addEventListener('submit', function() {
             const button = document.querySelector('.btn-primary');
